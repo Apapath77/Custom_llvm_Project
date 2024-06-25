@@ -33,23 +33,27 @@ private:
     void insertNOOPNInstructions(MachineBasicBlock &MBB, const RISCVInstrInfo *TII);
     bool hasDataHazard(const MachineInstr &MI, const SmallSet<unsigned, 32> &liveRegs, const SmallSet<unsigned, 32> &defRegs);
     void updateLiveAndDefRegs(const MachineInstr &MI, SmallSet<unsigned, 32> &liveRegs, SmallSet<unsigned, 32> &defRegs);
-    bool hasMemoryDependency(const MachineInstr &MI1, const MachineInstr &MI2);
+    bool RAW_hazard(const MachineInstr &Cur_MI, const MachineInstr &MI2, const SmallSet<unsigned, 32> &liveRegs, const SmallSet<unsigned, 32> &defRegs);
 };
 
 char RISCVMachineInstrHazards::ID = 0;
 
 bool RISCVMachineInstrHazards::runOnMachineFunction(MachineFunction &MF) {
+    // Print the name of the function being processed
     errs() << "Running RISC-V Machine Instruction Hazards Pass on function: " << MF.getName() << "\n";
 
+// Get the instruction information for the current subtarget
     const RISCVSubtarget &STI = MF.getSubtarget<RISCVSubtarget>();
     const RISCVInstrInfo *TII = STI.getInstrInfo();
 
+// Loop through each basic block in the machine function
     for (MachineBasicBlock &MBB : MF) {
-        errs() << "  Processing Machine Basic Block: " << MBB.getName() << "\n";
-        insertNOOPNInstructions(MBB, TII);
+        errs() << "  Processing Machine Basic Block: " << MBB.getName() << "\n";   // Print the name of the basic block being processed
+        insertNOOPNInstructions(MBB, TII);    // Insert NOOPN instructions into the basic block
 
+// Loop through each instruction in the basic block and print it
         for (MachineInstr &MI : MBB) {
-            errs() << "    Machine Instruction: ";
+            errs() << "    x Instruction: ";
             MI.print(errs());
             errs() << "\n";
         }
@@ -59,6 +63,8 @@ bool RISCVMachineInstrHazards::runOnMachineFunction(MachineFunction &MF) {
 }
 
 void RISCVMachineInstrHazards::insertNOOPNInstructions(MachineBasicBlock &MBB, const RISCVInstrInfo *TII) {
+    // Initialize sets for live and defined registers, and a counter for independent instructions
+
     SmallSet<unsigned, 32> liveRegs;
     SmallSet<unsigned, 32> defRegs;
     unsigned count = 0;
@@ -69,25 +75,35 @@ void RISCVMachineInstrHazards::insertNOOPNInstructions(MachineBasicBlock &MBB, c
     for (auto MI = MBB.begin(); MI != MBB.end(); ++MI) {
         bool isIndependent = true;
 
-        // Check for register dependencies
-        if (hasDataHazard(*MI, liveRegs, defRegs)) {
-            isIndependent = false;
+        // when I have this instructions I do not want to check for Hazzards because I do not know what the will do
+        if (MI->mayLoadOrStore() || MI->isBarrier() || MI->isBranch() || MI->isInlineAsm()) {
+            if (count != 0){
+                // Insert a NOOPN instruction if there were independent instructions before this    
+                BuildMI(MBB, InsertPos, DL, TII->get(RISCV::NOOPN), RISCV::X28)
+                        .addReg(RISCV::X28)
+                        .addImm(count);
+                count = 0;   
+            }
+            continue;
         }
+        
+        // if MI == CFI_INSTRUCTION or Debug continue;
+        if (MI->isDebugInstr() || MI->isCFIInstruction()) {continue;}
 
-        // Check for memory dependencies with previous instructions
+        // Check for RAW hazards with previous instructions
         for (auto MII = MBB.begin(); MII != MI; ++MII) {
-            if (hasMemoryDependency(*MI, *MII)) {
-                isIndependent = false;
+            if (RAW_hazard(*MI, *MII, liveRegs, defRegs)) {
+                isIndependent = false; // if a hazard found mark the instruction as a dependent
                 break;
             }
         }
 
         if (isIndependent) {
             if (count == 0) {
-                InsertPos = MI; // Mark the position before the first independent instruction
+                InsertPos = MI; // (Update the InsertPos) Mark the position before the first independent instruction
             }
             count++;
-        } else {
+        } else { // the is not independent and the count > 0 
             if (count > 0) {
                 // Insert NOOPN instruction before the sequence of independent instructions
                 BuildMI(MBB, InsertPos, DL, TII->get(RISCV::NOOPN), RISCV::X28)
@@ -100,19 +116,13 @@ void RISCVMachineInstrHazards::insertNOOPNInstructions(MachineBasicBlock &MBB, c
         }
 
         // Update live and def registers
-        updateLiveAndDefRegs(*MI, liveRegs, defRegs);
-    }
-
-    // Handle remaining independent instructions at the end of the basic block
-    if (count > 0) {
-        BuildMI(MBB, InsertPos, DL, TII->get(RISCV::NOOPN), RISCV::X28)
-            .addReg(RISCV::X28)
-            .addImm(count);
+        // updateLiveAndDefRegs(*MI, liveRegs, defRegs);
     }
 }
 
-bool RISCVMachineInstrHazards::hasDataHazard(const MachineInstr &MI, const SmallSet<unsigned, 32> &liveRegs, const SmallSet<unsigned, 32> &defRegs) {
-    for (const MachineOperand &MO : MI.operands()) {
+bool RISCVMachineInstrHazards::hasDataHazard(const MachineInstr &Cur_MI, const SmallSet<unsigned, 32> &liveRegs, const SmallSet<unsigned, 32> &defRegs) {
+    // Check for RAW hazards within the current instruction
+    for (const MachineOperand &MO : Cur_MI.operands()) {
         if (MO.isReg()) {
             unsigned Reg = MO.getReg();
             if (Reg == RISCV::NoRegister) continue;
@@ -120,31 +130,19 @@ bool RISCVMachineInstrHazards::hasDataHazard(const MachineInstr &MI, const Small
             if (MO.isUse() && defRegs.count(Reg)) {
                 return true;
             }
-            // Write After Read (WAR) hazard
-            if (MO.isDef() && liveRegs.count(Reg)) {
-                return true;
-            }
-            // Write After Write (WAW) hazard
-            if (MO.isDef() && defRegs.count(Reg)) {
-                return true;
-            }
         }
     }
     return false;
 }
 
-bool RISCVMachineInstrHazards::hasMemoryDependency(const MachineInstr &MI1, const MachineInstr &MI2) {
-    if (!MI1.mayLoadOrStore() || !MI2.mayLoadOrStore())
-        return false;
+bool RISCVMachineInstrHazards::RAW_hazard(const MachineInstr &Cur_MI, const MachineInstr &MI2, const SmallSet<unsigned, 32> &liveRegs, const SmallSet<unsigned, 32> &defRegs) {
 
-    // Check for potential memory dependencies
-    if (MI1.mayStore() || MI2.mayStore()) {
-        for (const MachineOperand &MO1 : MI1.operands()) {
-            if (MO1.isReg() && MO1.isUse()) {
-                for (const MachineOperand &MO2 : MI2.operands()) {
-                    if (MO2.isReg() && MO2.isUse() && MO1.getReg() == MO2.getReg()) {
-                        return true;
-                    }
+    // Check for RAW hazards between the current instruction and a previous instruction
+    for (const MachineOperand &MO1 : Cur_MI.operands()) {
+        if (MO1.isReg() && MO1.isUse() && MO1.getReg()!=RISCV::NoRegister) { /*.isUse true if is used for reading a value from register*/
+            for (const MachineOperand &MO2 : MI2.operands()) {
+                if (MO2.isReg() && MO1.getReg() == MO2.getReg() && MO2.isDef() && MO2.getReg()!=RISCV::NoRegister) { /*.isDef() true if is used for writing  a value to the register*/
+                    return true;
                 }
             }
         }
@@ -154,6 +152,7 @@ bool RISCVMachineInstrHazards::hasMemoryDependency(const MachineInstr &MI1, cons
 }
 
 void RISCVMachineInstrHazards::updateLiveAndDefRegs(const MachineInstr &MI, SmallSet<unsigned, 32> &liveRegs, SmallSet<unsigned, 32> &defRegs) {
+    // Update live and defined registers based on the current instruction's operands
     for (const MachineOperand &MO : MI.operands()) {
         if (MO.isReg()) {
             unsigned Reg = MO.getReg();

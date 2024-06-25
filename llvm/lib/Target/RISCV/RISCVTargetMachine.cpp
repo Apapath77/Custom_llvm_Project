@@ -32,18 +32,13 @@
 #include "llvm/Target/TargetOptions.h"
 using namespace llvm;
 
-// Forward declaration of the initialization function
-namespace llvm {
-    void initializeRISCVMachineInstrHazardsPass(PassRegistry &);
-}
-
 extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeRISCVTarget() {
   RegisterTargetMachine<RISCVTargetMachine> X(getTheRISCV32Target());
   RegisterTargetMachine<RISCVTargetMachine> Y(getTheRISCV64Target());
   auto PR = PassRegistry::getPassRegistry();
   initializeGlobalISel(*PR);
   initializeRISCVExpandPseudoPass(*PR);
-  initializeRISCVMachineInstrHazardsPass(*PR); // Initialize your pass here
+  initializeRISCVMachineInstrHazardsPass(*PR);
 }
 
 static StringRef computeDataLayout(const Triple &TT) {
